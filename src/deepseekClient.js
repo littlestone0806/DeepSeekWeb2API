@@ -1,4 +1,4 @@
-import fs from 'node:fs/promises';
+﻿import fs from 'node:fs/promises';
 import { chromium } from 'playwright';
 import { ApiError } from './http.js';
 import { logger } from './logger.js';
@@ -564,17 +564,65 @@ export class DeepSeekClient {
   }
 
   async submit() {
-    const button = this.page.getByRole('button', { name: SEND_BUTTON_NAMES }).first();
-    if ((await button.count().catch(() => 0)) > 0) {
-      await button.click({ force: true }).catch(async () => {
-        await this.page.keyboard.press('Enter');
-      });
-    } else {
-      const clicked = await this.clickGeometricSendButton();
-      if (!clicked) {
-        await this.page.keyboard.press('Enter');
+    const btn = this.page.locator('div.ds-button--primary').first();
+    try {
+      await btn.waitFor({ state: 'attached', timeout: 5000 });
+    } catch {
+      const fallbacks = [
+        'div.ds-button[class*="primary"]',
+        'div[class*="ds-button"][class*="send"]',
+        'button[data-testid*="send" i]',
+        'button[data-testid*="submit" i]',
+        '[data-testid*="send-message" i]',
+        'button[aria-label*="send" i]'
+      ];
+      for (const sel of fallbacks) {
+        const fb = this.page.locator(sel).first();
+        if ((await fb.count().catch(() => 0)) > 0) {
+          await this.clickSendButtonWhenReady(fb);
+          return;
+        }
       }
+      if (await this.clickGeometricSendButton()) return;
+      await this.page.keyboard.press('Enter');
+      return;
     }
+    await this.clickSendButtonWhenReady(btn);
+  }
+
+  async clickSendButtonWhenReady(btnLocator) {
+    const started = Date.now();
+    const timeout = 60000;
+    const sel = 'div.ds-button--primary';
+
+    while (Date.now() - started < timeout) {
+      const state = await this.page.evaluate((s) => {
+        const el = document.querySelector(s);
+        if (!el) return { found: false };
+        const ad = el.getAttribute('aria-disabled');
+        const st = window.getComputedStyle(el);
+        const disabled = ad === 'true' || st.pointerEvents === 'none' ||
+          parseFloat(st.opacity) < 0.5 || /\bdisabled\b/i.test(el.className || '') ||
+          st.cursor === 'wait' || st.cursor === 'not-allowed';
+        return { found: true, disabled, ad, pe: st.pointerEvents, op: st.opacity, cls: (el.className || '').slice(0, 50) };
+      }, sel).catch(() => ({ found: false }));
+
+      if (!state.found) {
+        await this.page.keyboard.press('Enter');
+        return;
+      }
+      if (!state.disabled) {
+        await btnLocator.click({ force: true, timeout: 3000 }).catch(async () => {
+          const box = await btnLocator.boundingBox().catch(() => null);
+          if (box) await this.page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+        });
+        await delay(500);
+        return;
+      }
+      await delay(300);
+    }
+
+    await btnLocator.click({ force: true }).catch(() => {});
   }
 
   async clickGeometricSendButton(timeoutMs = 20000) {
